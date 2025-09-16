@@ -1,0 +1,397 @@
+"""
+Simple intraprocedural backward slicing for message variable tracking.
+
+Performs reaching definitions analysis within a single method to track
+how log message variables are constructed.
+"""
+
+from typing import Dict, List, Set, Optional, Any, Tuple
+from collections import defaultdict, deque
+from .models import ExtractionContext
+
+
+class Variable:
+    """Represents a variable and its definition."""
+    
+    def __init__(self, name: str, node: Any, line: int):
+        self.name = name
+        self.node = node  # AST node where variable is defined
+        self.line = line
+        self.definition_type = self._get_definition_type(node)
+    
+    def _get_definition_type(self, node: Any) -> str:
+        """Determine the type of variable definition."""
+        if not node:
+            return "unknown"
+        
+        node_type = node.type
+        if node_type == "variable_declarator":
+            return "declaration"
+        elif node_type == "assignment_expression":
+            return "assignment"
+        elif node_type == "parameter":
+            return "parameter"
+        else:
+            return "unknown"
+    
+    def __str__(self) -> str:
+        return f"{self.name}@{self.line}({self.definition_type})"
+
+
+class SliceNode:
+    """Node in the program slice representing a statement."""
+    
+    def __init__(self, node: Any, line: int, variables_used: Set[str], variables_defined: Set[str]):
+        self.node = node
+        self.line = line
+        self.variables_used = variables_used
+        self.variables_defined = variables_defined
+        self.predecessors: Set[int] = set()
+        self.successors: Set[int] = set()
+    
+    def __str__(self) -> str:
+        return f"Line {self.line}: uses {self.variables_used}, defines {self.variables_defined}"
+
+
+class IntraproceduralSlicer:
+    """
+    Performs intraprocedural backward slicing to track variable definitions.
+    
+    Given a logging statement that uses a variable (e.g., log.warn(msg)),
+    this slicer finds all statements that contribute to the definition
+    of that variable within the same method.
+    """
+    
+    def __init__(self):
+        self.slice_nodes: Dict[int, SliceNode] = {}
+        self.variable_definitions: Dict[str, List[Variable]] = defaultdict(list)
+        self.reaching_definitions: Dict[int, Dict[str, Set[Variable]]] = defaultdict(lambda: defaultdict(set))
+    
+    def slice_variable(self, method_node: Any, target_variable: str, target_line: int, context: ExtractionContext) -> List[str]:
+        """
+        Perform backward slice for a target variable.
+        
+        Args:
+            method_node: AST node of the method containing the target
+            target_variable: Name of the variable to slice
+            target_line: Line number where variable is used
+            context: Extraction context
+            
+        Returns:
+            List of template patterns that could be the value of target_variable
+        """
+        # Build the slice representation
+        self._build_slice_nodes(method_node)
+        
+        # Perform reaching definitions analysis
+        self._compute_reaching_definitions()
+        
+        # Backward slice from the target
+        slice_lines = self._backward_slice(target_variable, target_line)
+        
+        # Extract patterns from sliced statements
+        return self._extract_patterns_from_slice(slice_lines, target_variable)
+    
+    def _build_slice_nodes(self, method_node: Any) -> None:
+        """Build slice nodes from the method AST."""
+        self.slice_nodes.clear()
+        self.variable_definitions.clear()
+        
+        # Traverse the method to find all statements
+        for node in self._traverse_statements(method_node):
+            line = self._get_line_number(node)
+            
+            # Analyze variable usage and definitions
+            used_vars = self._get_variables_used(node)
+            defined_vars = self._get_variables_defined(node)
+            
+            # Create slice node
+            slice_node = SliceNode(node, line, used_vars, defined_vars)
+            self.slice_nodes[line] = slice_node
+            
+            # Record variable definitions
+            for var_name in defined_vars:
+                variable = Variable(var_name, node, line)
+                self.variable_definitions[var_name].append(variable)
+    
+    def _traverse_statements(self, node: Any) -> List[Any]:
+        """Traverse AST to find all statement nodes."""
+        statements = []
+        
+        def visit(n):
+            if self._is_statement(n):
+                statements.append(n)
+            
+            # Recurse into children
+            for child in n.children if hasattr(n, 'children') else []:
+                visit(child)
+        
+        visit(node)
+        return statements
+    
+    def _is_statement(self, node: Any) -> bool:
+        """Check if node represents a statement."""
+        statement_types = {
+            'expression_statement', 'local_variable_declaration',
+            'assignment_expression', 'method_invocation',
+            'if_statement', 'while_statement', 'for_statement',
+            'return_statement', 'throw_statement'
+        }
+        return node.type in statement_types
+    
+    def _get_line_number(self, node: Any) -> int:
+        """Get line number from AST node."""
+        try:
+            return node.start_point[0] + 1  # Tree-sitter uses 0-based line numbers
+        except:
+            return 0
+    
+    def _get_variables_used(self, node: Any) -> Set[str]:
+        """Extract variables used in a statement."""
+        used_vars = set()
+        
+        def visit(n):
+            if n.type == 'identifier':
+                # Check if this identifier is being used (not defined)
+                parent = n.parent
+                if parent and not self._is_definition_context(n, parent):
+                    used_vars.add(n.text.decode('utf-8'))
+            
+            for child in n.children if hasattr(n, 'children') else []:
+                visit(child)
+        
+        visit(node)
+        return used_vars
+    
+    def _get_variables_defined(self, node: Any) -> Set[str]:
+        """Extract variables defined in a statement."""
+        defined_vars = set()
+        
+        if node.type == 'local_variable_declaration':
+            # Find variable declarators
+            for child in node.children:
+                if child.type == 'variable_declarator':
+                    name_node = child.child_by_field_name('name')
+                    if name_node:
+                        defined_vars.add(name_node.text.decode('utf-8'))
+        
+        elif node.type == 'assignment_expression':
+            # Left side of assignment
+            left = node.child_by_field_name('left')
+            if left and left.type == 'identifier':
+                defined_vars.add(left.text.decode('utf-8'))
+        
+        return defined_vars
+    
+    def _is_definition_context(self, identifier_node: Any, parent_node: Any) -> bool:
+        """Check if identifier is in a definition context."""
+        if parent_node.type == 'variable_declarator':
+            # Check if this is the name being declared
+            name_field = parent_node.child_by_field_name('name')
+            return name_field == identifier_node
+        
+        elif parent_node.type == 'assignment_expression':
+            # Check if this is the left side of assignment
+            left_field = parent_node.child_by_field_name('left')
+            return left_field == identifier_node
+        
+        return False
+    
+    def _compute_reaching_definitions(self) -> None:
+        """Compute reaching definitions for each statement."""
+        self.reaching_definitions.clear()
+        
+        # Initialize with empty sets
+        for line in self.slice_nodes:
+            self.reaching_definitions[line] = defaultdict(set)
+        
+        # Iterative data flow analysis
+        changed = True
+        while changed:
+            changed = False
+            
+            for line in sorted(self.slice_nodes.keys()):
+                slice_node = self.slice_nodes[line]
+                old_reaching = dict(self.reaching_definitions[line])
+                
+                # IN[n] = union of OUT[p] for all predecessors p
+                new_reaching = defaultdict(set)
+                for pred_line in slice_node.predecessors:
+                    if pred_line in self.reaching_definitions:
+                        for var, defs in self.reaching_definitions[pred_line].items():
+                            new_reaching[var].update(defs)
+                
+                # OUT[n] = (IN[n] - KILL[n]) union GEN[n]
+                # KILL[n] = definitions of variables defined in n
+                # GEN[n] = definitions generated in n
+                
+                for var in slice_node.variables_defined:
+                    # Kill previous definitions of this variable
+                    new_reaching[var] = set()
+                    # Add new definition
+                    for variable in self.variable_definitions[var]:
+                        if variable.line == line:
+                            new_reaching[var].add(variable)
+                
+                # Check if anything changed
+                if new_reaching != old_reaching:
+                    self.reaching_definitions[line] = new_reaching
+                    changed = True
+    
+    def _backward_slice(self, target_variable: str, target_line: int) -> Set[int]:
+        """
+        Perform backward slice starting from target variable usage.
+        
+        Returns set of line numbers that contribute to the target variable.
+        """
+        slice_lines = set()
+        worklist = deque([(target_variable, target_line)])
+        processed = set()
+        
+        while worklist:
+            var_name, line = worklist.popleft()
+            
+            if (var_name, line) in processed:
+                continue
+            processed.add((var_name, line))
+            
+            # Find definitions of this variable that reach this line
+            if line in self.reaching_definitions:
+                reaching_defs = self.reaching_definitions[line].get(var_name, set())
+                
+                for definition in reaching_defs:
+                    def_line = definition.line
+                    slice_lines.add(def_line)
+                    
+                    # Add variables used in the definition to worklist
+                    if def_line in self.slice_nodes:
+                        slice_node = self.slice_nodes[def_line]
+                        for used_var in slice_node.variables_used:
+                            worklist.append((used_var, def_line))
+        
+        return slice_lines
+    
+    def _extract_patterns_from_slice(self, slice_lines: Set[int], target_variable: str) -> List[str]:
+        """
+        Extract template patterns from the sliced statements.
+        
+        This analyzes the sliced statements to determine possible values
+        of the target variable and converts them to template patterns.
+        """
+        patterns = []
+        
+        for line in sorted(slice_lines):
+            if line not in self.slice_nodes:
+                continue
+            
+            slice_node = self.slice_nodes[line]
+            
+            # Check if this statement defines our target variable
+            if target_variable in slice_node.variables_defined:
+                pattern = self._extract_pattern_from_definition(slice_node.node, target_variable)
+                if pattern:
+                    patterns.append(pattern)
+        
+        # If no patterns found, return a generic placeholder
+        if not patterns:
+            patterns.append("<*>")
+        
+        return patterns
+    
+    def _extract_pattern_from_definition(self, node: Any, variable_name: str) -> Optional[str]:
+        """Extract template pattern from a variable definition statement."""
+        try:
+            if node.type == 'local_variable_declaration':
+                # Find the variable declarator
+                for child in node.children:
+                    if child.type == 'variable_declarator':
+                        name_node = child.child_by_field_name('name')
+                        value_node = child.child_by_field_name('value')
+                        
+                        if (name_node and 
+                            name_node.text.decode('utf-8') == variable_name and
+                            value_node):
+                            return self._node_to_pattern(value_node)
+            
+            elif node.type == 'assignment_expression':
+                left = node.child_by_field_name('left')
+                right = node.child_by_field_name('right')
+                
+                if (left and right and 
+                    left.type == 'identifier' and
+                    left.text.decode('utf-8') == variable_name):
+                    return self._node_to_pattern(right)
+        
+        except Exception:
+            pass
+        
+        return None
+    
+    def _node_to_pattern(self, node: Any) -> str:
+        """Convert an AST node to a template pattern."""
+        try:
+            if node.type == 'string_literal':
+                content = node.text.decode('utf-8')
+                if content.startswith('"') and content.endswith('"'):
+                    return content[1:-1]
+                elif content.startswith("'") and content.endswith("'"):
+                    return content[1:-1]
+                return content
+            
+            elif node.type == 'binary_expression':
+                # Handle string concatenation
+                operator = node.child_by_field_name('operator')
+                if operator and operator.text.decode('utf-8') == '+':
+                    left = node.child_by_field_name('left')
+                    right = node.child_by_field_name('right')
+                    
+                    left_pattern = self._node_to_pattern(left) if left else "<*>"
+                    right_pattern = self._node_to_pattern(right) if right else "<*>"
+                    
+                    return f"{left_pattern} {right_pattern}"
+            
+            elif node.type == 'method_invocation':
+                # Could be StringBuilder.toString(), String.format(), etc.
+                return self._method_call_to_pattern(node)
+            
+            else:
+                # Unknown expression, treat as placeholder
+                return "<*>"
+        
+        except Exception:
+            return "<*>"
+    
+    def _method_call_to_pattern(self, node: Any) -> str:
+        """Convert method call to template pattern."""
+        try:
+            object_node = node.child_by_field_name('object')
+            name_node = node.child_by_field_name('name')
+            
+            if not (object_node and name_node):
+                return "<*>"
+            
+            method_name = name_node.text.decode('utf-8')
+            
+            if method_name == 'toString':
+                # Could be StringBuilder.toString()
+                return self._node_to_pattern(object_node)
+            
+            elif method_name == 'format':
+                # String.format call
+                args_node = node.child_by_field_name('arguments')
+                if args_node:
+                    # First argument is format string
+                    for child in args_node.children:
+                        if child.type == 'string_literal':
+                            format_str = child.text.decode('utf-8')
+                            if format_str.startswith('"') and format_str.endswith('"'):
+                                format_str = format_str[1:-1]
+                            # Replace format specifiers with placeholders
+                            import re
+                            pattern = re.sub(r'%[+-]?[0-9]*\.?[0-9]*[diouxXeEfFgGaAcsSn]', '<*>', format_str)
+                            return pattern
+            
+            return "<*>"
+        
+        except Exception:
+            return "<*>"
