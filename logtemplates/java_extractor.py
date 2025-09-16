@@ -205,16 +205,23 @@ class JavaLogExtractor:
         """Extract templates from AST tree."""
         templates = []
         
-        # Find all classes
+        # Find all classes (including anonymous and nested classes)
         for class_node in self._find_nodes_by_type(root_node, 'class_declaration'):
             class_name = self._get_class_name(class_node)
             class_context = context.copy()
             class_context.class_name = class_name
             
-            # Find all methods in the class
-            for method_node in self._find_nodes_by_type(class_node, 'method_declaration'):
+            # Extract from this class
+            class_templates = self._extract_from_class(class_node, class_context)
+            templates.extend(class_templates)
+        
+        # Also look for anonymous classes and other method containers
+        for method_node in self._find_all_methods(root_node):
+            # For methods not in a named class, use a generic context
+            if not any(self._is_inside_class(method_node, class_node) 
+                      for class_node in self._find_nodes_by_type(root_node, 'class_declaration')):
                 method_name = self._get_method_name(method_node)
-                method_context = class_context.copy()
+                method_context = context.copy()
                 method_context.method_name = method_name
                 
                 # Extract templates from this method
@@ -222,6 +229,45 @@ class JavaLogExtractor:
                 templates.extend(method_templates)
         
         return templates
+    
+    def _extract_from_class(self, class_node, class_context: ExtractionContext) -> List[LogTemplate]:
+        """Extract templates from all methods in a class, including nested structures."""
+        templates = []
+        
+        # Find all methods in this class (including nested ones)
+        for method_node in self._find_all_methods(class_node):
+            method_name = self._get_method_name(method_node)
+            method_context = class_context.copy()
+            method_context.method_name = method_name
+            
+            # Extract templates from this method
+            method_templates = self._extract_from_method(method_node, method_context)
+            templates.extend(method_templates)
+        
+        return templates
+    
+    def _find_all_methods(self, root_node) -> List:
+        """Find all method declarations, including those in anonymous classes."""
+        methods = []
+        
+        def visit(node):
+            if node.type == 'method_declaration':
+                methods.append(node)
+            # Recurse into children
+            for child in node.children:
+                visit(child)
+        
+        visit(root_node)
+        return methods
+    
+    def _is_inside_class(self, method_node, class_node) -> bool:
+        """Check if a method node is inside a specific class node."""
+        current = method_node.parent
+        while current:
+            if current == class_node:
+                return True
+            current = current.parent
+        return False
     
     def _extract_from_method(self, method_node, context: ExtractionContext) -> List[LogTemplate]:
         """Extract templates from a single method."""
@@ -231,8 +277,17 @@ class JavaLogExtractor:
         logging_calls = self._find_logging_calls(method_node)
         
         for call_node in logging_calls:
+            # Find the most specific method context for this logging call
+            specific_method = self._find_innermost_method_for_call(call_node, method_node)
+            
             call_context = context.copy()
             call_context.current_line = self._get_line_number(call_node)
+            
+            # Update method name to the most specific one
+            if specific_method != method_node:
+                specific_method_name = self._get_method_name(specific_method)
+                if specific_method_name:
+                    call_context.method_name = specific_method_name
             
             # Try direct template extraction
             direct_templates = self.template_builder.extract_templates(call_node, call_context)
@@ -240,14 +295,29 @@ class JavaLogExtractor:
             if direct_templates:
                 templates.extend(direct_templates)
             else:
-                # Try backward slicing for indirect patterns
-                indirect_templates = self._extract_with_slicing(call_node, method_node, call_context)
+                # Try backward slicing for indirect patterns using the specific method context
+                indirect_templates = self._extract_with_slicing(call_node, specific_method, call_context)
                 templates.extend(indirect_templates)
         
         # Limit branch variants to prevent explosion
         templates = self._limit_branch_variants(templates)
         
         return templates
+    
+    def _find_innermost_method_for_call(self, call_node, outer_method_node):
+        """Find the innermost method that contains the logging call."""
+        # Start from the call node and walk up to find the nearest method declaration
+        current = call_node.parent
+        innermost_method = outer_method_node  # Default to outer method
+        
+        while current and current != outer_method_node.parent:
+            if current.type == 'method_declaration':
+                # This is a more specific method than the outer one
+                innermost_method = current
+                break
+            current = current.parent
+        
+        return innermost_method
     
     def _find_logging_calls(self, method_node) -> List:
         """Find all potential logging method calls in a method."""
