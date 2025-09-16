@@ -305,8 +305,8 @@ class JavaLogExtractor:
         return templates
     
     def _find_innermost_method_for_call(self, call_node, outer_method_node):
-        """Find the innermost method that contains the logging call."""
-        # Start from the call node and walk up to find the nearest method declaration
+        """Find the innermost method or lambda scope that contains the logging call."""
+        # Start from the call node and walk up to find the nearest method declaration or lambda
         current = call_node.parent
         innermost_method = outer_method_node  # Default to outer method
         
@@ -315,9 +315,32 @@ class JavaLogExtractor:
                 # This is a more specific method than the outer one
                 innermost_method = current
                 break
+            elif current.type == 'lambda_expression':
+                # For lambda expressions, find the containing block that has variable definitions
+                lambda_body = self._find_lambda_body(current)
+                if lambda_body:
+                    innermost_method = lambda_body
+                    break
             current = current.parent
         
         return innermost_method
+    
+    def _find_lambda_body(self, lambda_node):
+        """Find the body/block of a lambda expression that can contain variable definitions."""
+        try:
+            # Look for the body of the lambda expression
+            # From AST analysis, the lambda structure is: lambda_expression -> block
+            for child in lambda_node.children:
+                if child.type == 'block':
+                    return child
+                elif child.type == 'lambda_body':
+                    # Some tree-sitter versions might use lambda_body
+                    for subchild in child.children:
+                        if subchild.type == 'block':
+                            return subchild
+            return None
+        except Exception:
+            return None
     
     def _find_logging_calls(self, method_node) -> List:
         """Find all potential logging method calls in a method."""
@@ -401,15 +424,53 @@ class JavaLogExtractor:
         
         try:
             args_node = call_node.child_by_field_name('arguments')
-            if args_node:
-                # Look for identifier arguments (variables) and method calls
-                for child in args_node.children:
-                    if child.type == 'identifier':
-                        variables.add(child.text.decode('utf-8'))
-                    elif child.type == 'method_invocation':
-                        # For method calls, extract variables used within the call
-                        method_variables = self._extract_variables_from_method_call(child)
-                        variables.update(method_variables)
+            if not args_node:
+                return variables
+                
+            # Get method name to determine message argument position
+            name_node = call_node.child_by_field_name('name')
+            method_name = name_node.text.decode('utf-8') if name_node else ""
+            
+            # Collect all non-punctuation arguments
+            args = []
+            for child in args_node.children:
+                if child.type in ['string_literal', 'binary_expression', 'method_invocation', 'identifier', 'null_literal']:
+                    args.append(child)
+            
+            # Determine which argument is the message (but skip SLF4J placeholder patterns)
+            message_arg = None
+            
+            # Check if this is a meaningful SLF4J placeholder pattern
+            if len(args) >= 1 and args[0].type == 'string_literal':
+                # Check if the first argument contains SLF4J placeholders
+                first_arg_text = args[0].text.decode('utf-8')
+                if '{}' in first_arg_text and len(first_arg_text.strip('"\'')) > 2:
+                    # This is a meaningful SLF4J placeholder pattern (more than just "{}") - don't extract variables
+                    return variables
+            
+            if method_name == 'log' and len(args) >= 4:
+                # For logger.log(marker, fqcn, level, message, ...), message is 4th argument
+                message_arg = args[3]
+            elif method_name in ['trace', 'debug', 'info', 'warn', 'error'] and len(args) >= 2:
+                # Check if first argument is likely a Marker (identifier) and second is the message
+                if args[0].type == 'identifier' and args[1].type in ['string_literal', 'binary_expression', 'method_invocation']:
+                    # Pattern: logger.warn(marker, message)
+                    message_arg = args[1]
+                elif len(args) >= 1:
+                    # Pattern: logger.warn(message) 
+                    message_arg = args[0]
+            elif len(args) >= 1:
+                # For other methods, message is typically first argument
+                message_arg = args[0]
+            
+            if message_arg:
+                # Only extract variables from the message argument
+                if message_arg.type == 'identifier':
+                    variables.add(message_arg.text.decode('utf-8'))
+                elif message_arg.type == 'method_invocation':
+                    # For method calls, extract variables used within the call
+                    method_variables = self._extract_variables_from_method_call(message_arg)
+                    variables.update(method_variables)
         except:
             pass
         

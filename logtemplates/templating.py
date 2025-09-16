@@ -89,6 +89,14 @@ class SLF4JTemplateRule(TemplateRule):
             if method_name == 'log' and len(args) >= 4:
                 # For logger.log(marker, fqcn, level, message, ...), message is 4th argument
                 message_arg = args[3]
+            elif method_name in ['trace', 'debug', 'info', 'warn', 'error'] and len(args) >= 2:
+                # Check if first argument is likely a Marker (identifier) and second is the message
+                if args[0].type == 'identifier' and args[1].type in ['string_literal', 'binary_expression', 'method_invocation']:
+                    # Pattern: logger.warn(marker, message)
+                    message_arg = args[1]
+                elif len(args) >= 1:
+                    # Pattern: logger.warn(message) 
+                    message_arg = args[0]
             elif len(args) >= 1:
                 # For other methods, message is typically first argument
                 message_arg = args[0]
@@ -98,14 +106,12 @@ class SLF4JTemplateRule(TemplateRule):
             
             # Extract message content based on argument type
             message = self._extract_message_from_node(message_arg)
-            if not message:
-                return []
+            if not message or message == "<!PLACEHOLDER!>":
+                return []  # Let backward slicing handle this
             
-            # Replace {} placeholders with <*>
-            template = re.sub(r'\{\}', '<*>', message)
-            
-            # Handle escaped braces
-            template = template.replace('\\{\\}', '{}')
+            # For SLF4J patterns, keep {} placeholders as-is since they represent the template format
+            # Only handle escaped braces
+            template = message.replace('\\{\\}', '{}')
             
             return [template]
             
@@ -176,7 +182,7 @@ class SLF4JTemplateRule(TemplateRule):
             method_name = name_node.text.decode('utf-8')
             
             # Handle common patterns
-            if method_name in ['addPrefix', 'addSuffix', 'format', 'toString']:
+            if method_name in ['addPrefix', 'addSuffix', 'format', 'toString', 'getMessage', 'getLocalizedMessage']:
                 # For these methods, we can try to create a meaningful pattern
                 args_node = node.child_by_field_name('arguments')
                 if args_node:
@@ -195,8 +201,9 @@ class SLF4JTemplateRule(TemplateRule):
                 # Default pattern for method calls
                 return f"<method:{method_name}(<*>)>"
             
-            # For unknown methods, return generic placeholder
-            return "<!PLACEHOLDER!>"
+            # For other method calls, create a generic but informative pattern
+            # This handles cases like obj.someMethod() without having to list every possible method
+            return f"<method:{method_name}()>"
         
         except Exception:
             return "<!PLACEHOLDER!>"

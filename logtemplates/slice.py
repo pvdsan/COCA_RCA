@@ -90,7 +90,132 @@ class IntraproceduralSlicer:
         slice_lines = self._backward_slice(target_variable, target_line)
         
         # Extract patterns from sliced statements
-        return self._extract_patterns_from_slice(slice_lines, target_variable)
+        patterns = self._extract_patterns_from_slice(slice_lines, target_variable)
+        
+        # If no patterns found, check if it's a method parameter or class constant
+        if not patterns:
+            if self._is_method_parameter(method_node, target_variable):
+                return [f"<param:{target_variable}>"]
+            elif self._is_class_constant(method_node, target_variable):
+                constant_value = self._get_class_constant_value(method_node, target_variable)
+                if constant_value:
+                    return [constant_value]
+                else:
+                    return [f"<const:{target_variable}>"]
+            else:
+                # Fallback for unknown variables
+                return ["<*>"]
+        
+        return patterns
+    
+    def _is_method_parameter(self, method_node: Any, variable_name: str) -> bool:
+        """Check if a variable is a method parameter."""
+        try:
+            parameters_node = method_node.child_by_field_name('parameters')
+            if not parameters_node:
+                return False
+            
+            # Look through parameter list
+            for child in parameters_node.children:
+                if child.type == 'formal_parameter':
+                    name_node = child.child_by_field_name('name')
+                    if name_node and name_node.text.decode('utf-8') == variable_name:
+                        return True
+            
+            return False
+        except Exception:
+            return False
+    
+    def _is_class_constant(self, method_node: Any, variable_name: str) -> bool:
+        """Check if a variable is a class-level constant (static final field)."""
+        try:
+            # Navigate up to find the class containing this method
+            class_node = self._find_containing_class(method_node)
+            if not class_node:
+                return False
+            
+            # Look for field declarations in the class
+            class_body = None
+            for child in class_node.children:
+                if child.type == 'class_body':
+                    class_body = child
+                    break
+            
+            if not class_body:
+                return False
+            
+            # Search for static final fields
+            for member in class_body.children:
+                if member.type == 'field_declaration':
+                    # Check if it's static final
+                    is_static = False
+                    is_final = False
+                    
+                    for child in member.children:
+                        if child.type == 'modifiers':
+                            for modifier in child.children:
+                                if modifier.text.decode('utf-8') == 'static':
+                                    is_static = True
+                                elif modifier.text.decode('utf-8') == 'final':
+                                    is_final = True
+                    
+                    # If it's a static final field, check the variable name
+                    if is_static and is_final:
+                        for child in member.children:
+                            if child.type == 'variable_declarator':
+                                name_node = child.child_by_field_name('name')
+                                if name_node and name_node.text.decode('utf-8') == variable_name:
+                                    return True
+            
+            return False
+        except Exception:
+            return False
+    
+    def _get_class_constant_value(self, method_node: Any, variable_name: str) -> str:
+        """Get the value of a class constant if it's a simple string or pattern."""
+        try:
+            # Navigate up to find the class containing this method
+            class_node = self._find_containing_class(method_node)
+            if not class_node:
+                return ""
+            
+            # Look for the field declaration
+            class_body = None
+            for child in class_node.children:
+                if child.type == 'class_body':
+                    class_body = child
+                    break
+            
+            if not class_body:
+                return ""
+            
+            # Search for the specific constant
+            for member in class_body.children:
+                if member.type == 'field_declaration':
+                    for child in member.children:
+                        if child.type == 'variable_declarator':
+                            name_node = child.child_by_field_name('name')
+                            value_node = child.child_by_field_name('value')
+                            
+                            if (name_node and name_node.text.decode('utf-8') == variable_name and value_node):
+                                # Try to extract the constant value
+                                return self._node_to_pattern(value_node)
+            
+            return ""
+        except Exception:
+            return ""
+    
+    def _find_containing_class(self, method_node: Any) -> Any:
+        """Find the class node that contains the given method."""
+        try:
+            current = method_node.parent
+            while current:
+                if current.type == 'class_declaration':
+                    return current
+                current = current.parent
+            return None
+        except Exception:
+            return None
     
     def _build_slice_nodes(self, method_node: Any) -> None:
         """Build slice nodes from the method AST."""
@@ -293,10 +418,6 @@ class IntraproceduralSlicer:
                 if pattern:
                     patterns.append(pattern)
         
-        # If no patterns found, return a generic placeholder
-        if not patterns:
-            patterns.append("<*>")
-        
         return patterns
     
     def _extract_pattern_from_definition(self, node: Any, variable_name: str) -> Optional[str]:
@@ -377,7 +498,7 @@ class IntraproceduralSlicer:
             object_node = node.child_by_field_name('object')
             name_node = node.child_by_field_name('name')
             
-            if not (object_node and name_node):
+            if not name_node:
                 return "<*>"
             
             object_text = object_node.text.decode('utf-8') if object_node else ""
@@ -413,7 +534,14 @@ class IntraproceduralSlicer:
                                 pattern = re.sub(r'%[+-]?[0-9]*\.?[0-9]*[diouxXeEfFgGaAcsSn]', '<*>', concatenated_str)
                                 return pattern
             
-            return "<*>"
+            # For other method calls, create a meaningful pattern
+            # This helps identify what kind of method call generated the log message
+            if object_text and method_name:
+                return f"<method:{object_text}.{method_name}()>"
+            elif method_name:
+                return f"<method:{method_name}()>"
+            else:
+                return "<*>"
         
         except Exception as e:
             return "<*>"
