@@ -112,6 +112,10 @@ class SLF4JTemplateRule(TemplateRule):
             # Handle string concatenation like "str1" + "str2"
             return self._extract_concatenated_string(node)
         
+        elif node.type in ['identifier', 'field_access', 'method_invocation']:
+            # Variables, field access, method calls - return special marker
+            return "<!PLACEHOLDER!>"
+        
         return ""
     
     def _extract_concatenated_string(self, node: Any) -> str:
@@ -134,9 +138,11 @@ class SLF4JTemplateRule(TemplateRule):
         left_str = self._extract_message_from_node(left)
         right_str = self._extract_message_from_node(right)
         
-        # Only combine if both are string literals
-        if left_str and right_str:
-            return left_str + right_str
+        # Replace placeholder markers and combine
+        if left_str or right_str:
+            result_left = left_str.replace("<!PLACEHOLDER!>", "<*>") if left_str else "<*>"
+            result_right = right_str.replace("<!PLACEHOLDER!>", "<*>") if right_str else "<*>"
+            return result_left + result_right
         
         return ""
 

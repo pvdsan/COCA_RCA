@@ -49,7 +49,8 @@ class CacheManager:
         try:
             current_mtime = os.path.getmtime(file_path)
             cached_mtime = self.metadata.get(file_path, 0)
-            return current_mtime <= cached_mtime
+            # File is cached if it hasn't been modified since we last processed it
+            return cached_mtime > 0 and current_mtime <= cached_mtime
         except OSError:
             return False
     
@@ -71,7 +72,7 @@ class CacheManager:
         return []
     
     def save_templates(self, templates: List[LogTemplate]) -> None:
-        """Save templates to cache."""
+        """Save templates to cache, replacing the entire cache."""
         with open(self.templates_file, 'wb') as f:
             pickle.dump(templates, f)
         self._save_metadata()

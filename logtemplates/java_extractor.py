@@ -116,9 +116,22 @@ class JavaLogExtractor:
         # Combine with cached templates
         all_templates = cached_templates + new_templates
         
-        # Update cache
+        # Update cache with incremental approach
         if use_cache and new_templates:
-            self.cache_manager.save_templates(all_templates)
+            # Only save new templates to cache, don't resave existing ones
+            existing_cached_templates = self.cache_manager.get_cached_templates()
+            
+            # Filter out any new templates that might already exist (deduplication)
+            new_template_ids = {t.template_id for t in new_templates}
+            existing_template_ids = {t.template_id for t in existing_cached_templates}
+            truly_new_templates = [t for t in new_templates if t.template_id not in existing_template_ids]
+            
+            if truly_new_templates:
+                # Save the complete set: existing + truly new
+                final_templates = existing_cached_templates + truly_new_templates
+                self.cache_manager.save_templates(final_templates)
+            
+            # Mark processed files
             for file_path in files_to_process:
                 self.cache_manager.mark_file_processed(str(file_path))
         
