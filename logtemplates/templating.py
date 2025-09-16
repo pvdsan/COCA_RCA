@@ -74,7 +74,7 @@ class SLF4JTemplateRule(TemplateRule):
             # Find the first argument (message template)
             first_arg = None
             for child in args_node.children:
-                if child.type in ['string_literal', 'binary_expression']:
+                if child.type in ['string_literal', 'binary_expression', 'method_invocation', 'identifier']:
                     first_arg = child
                     break
             
@@ -112,9 +112,13 @@ class SLF4JTemplateRule(TemplateRule):
             # Handle string concatenation like "str1" + "str2"
             return self._extract_concatenated_string(node)
         
-        elif node.type in ['identifier', 'field_access', 'method_invocation']:
-            # Variables, field access, method calls - return special marker
+        elif node.type in ['identifier', 'field_access']:
+            # Variables, field access - return special marker for slicing
             return "<!PLACEHOLDER!>"
+        
+        elif node.type == 'method_invocation':
+            # Method calls - try to extract a meaningful pattern
+            return self._extract_method_call_pattern(node)
         
         return ""
     
@@ -145,6 +149,42 @@ class SLF4JTemplateRule(TemplateRule):
             return result_left + result_right
         
         return ""
+    
+    def _extract_method_call_pattern(self, node: Any) -> str:
+        """Extract pattern from method call."""
+        try:
+            # Get method name
+            name_node = node.child_by_field_name('name')
+            if not name_node:
+                return "<!PLACEHOLDER!>"
+            
+            method_name = name_node.text.decode('utf-8')
+            
+            # Handle common patterns
+            if method_name in ['addPrefix', 'addSuffix', 'format', 'toString']:
+                # For these methods, we can try to create a meaningful pattern
+                args_node = node.child_by_field_name('arguments')
+                if args_node:
+                    # Look for string literals in arguments
+                    for child in args_node.children:
+                        if child.type == 'identifier':
+                            # If method takes a variable, create a placeholder pattern
+                            return f"<method:{method_name}(<*>)>"
+                        elif child.type == 'string_literal':
+                            # If method takes a literal, include it
+                            content = child.text.decode('utf-8')
+                            if content.startswith('"') and content.endswith('"'):
+                                content = content[1:-1]
+                            return f"<method:{method_name}({content})>"
+                
+                # Default pattern for method calls
+                return f"<method:{method_name}(<*>)>"
+            
+            # For unknown methods, return generic placeholder
+            return "<!PLACEHOLDER!>"
+        
+        except Exception:
+            return "<!PLACEHOLDER!>"
 
 
 class StringFormatTemplateRule(TemplateRule):

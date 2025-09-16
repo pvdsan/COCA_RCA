@@ -402,10 +402,34 @@ class JavaLogExtractor:
         try:
             args_node = call_node.child_by_field_name('arguments')
             if args_node:
-                # Look for identifier arguments (variables)
+                # Look for identifier arguments (variables) and method calls
                 for child in args_node.children:
                     if child.type == 'identifier':
                         variables.add(child.text.decode('utf-8'))
+                    elif child.type == 'method_invocation':
+                        # For method calls, extract variables used within the call
+                        method_variables = self._extract_variables_from_method_call(child)
+                        variables.update(method_variables)
+        except:
+            pass
+        
+        return variables
+    
+    def _extract_variables_from_method_call(self, method_node) -> Set[str]:
+        """Extract variables used within a method call."""
+        variables = set()
+        
+        try:
+            # Look for variables in the method arguments
+            args_node = method_node.child_by_field_name('arguments')
+            if args_node:
+                for child in args_node.children:
+                    if child.type == 'identifier':
+                        variables.add(child.text.decode('utf-8'))
+                    # Recursively handle nested method calls
+                    elif child.type == 'method_invocation':
+                        nested_vars = self._extract_variables_from_method_call(child)
+                        variables.update(nested_vars)
         except:
             pass
         
