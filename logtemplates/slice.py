@@ -121,10 +121,16 @@ class IntraproceduralSlicer:
         def visit(n):
             if self._is_statement(n):
                 statements.append(n)
-            
-            # Recurse into children
-            for child in n.children if hasattr(n, 'children') else []:
-                visit(child)
+                
+                # For blocks and control structures, also recurse into their children
+                # to find nested statements
+                if n.type in ['block', 'if_statement', 'while_statement', 'for_statement']:
+                    for child in n.children if hasattr(n, 'children') else []:
+                        visit(child)
+            else:
+                # If not a statement, keep looking deeper
+                for child in n.children if hasattr(n, 'children') else []:
+                    visit(child)
         
         visit(node)
         return statements
@@ -135,7 +141,7 @@ class IntraproceduralSlicer:
             'expression_statement', 'local_variable_declaration',
             'assignment_expression', 'method_invocation',
             'if_statement', 'while_statement', 'for_statement',
-            'return_statement', 'throw_statement'
+            'return_statement', 'throw_statement', 'block'
         }
         return node.type in statement_types
     
@@ -181,6 +187,12 @@ class IntraproceduralSlicer:
             if left and left.type == 'identifier':
                 defined_vars.add(left.text.decode('utf-8'))
         
+        elif node.type == 'expression_statement':
+            # Check if this contains a variable declaration or assignment
+            for child in node.children:
+                child_defined = self._get_variables_defined(child)
+                defined_vars.update(child_defined)
+        
         return defined_vars
     
     def _is_definition_context(self, identifier_node: Any, parent_node: Any) -> bool:
@@ -205,38 +217,27 @@ class IntraproceduralSlicer:
         for line in self.slice_nodes:
             self.reaching_definitions[line] = defaultdict(set)
         
-        # Iterative data flow analysis
-        changed = True
-        while changed:
-            changed = False
+        # Simple sequential flow: each statement can reach the next
+        # This is a simplified approach for intraprocedural analysis
+        sorted_lines = sorted(self.slice_nodes.keys())
+        
+        for i, line in enumerate(sorted_lines):
+            slice_node = self.slice_nodes[line]
             
-            for line in sorted(self.slice_nodes.keys()):
-                slice_node = self.slice_nodes[line]
-                old_reaching = dict(self.reaching_definitions[line])
-                
-                # IN[n] = union of OUT[p] for all predecessors p
-                new_reaching = defaultdict(set)
-                for pred_line in slice_node.predecessors:
-                    if pred_line in self.reaching_definitions:
-                        for var, defs in self.reaching_definitions[pred_line].items():
-                            new_reaching[var].update(defs)
-                
-                # OUT[n] = (IN[n] - KILL[n]) union GEN[n]
-                # KILL[n] = definitions of variables defined in n
-                # GEN[n] = definitions generated in n
-                
-                for var in slice_node.variables_defined:
-                    # Kill previous definitions of this variable
-                    new_reaching[var] = set()
-                    # Add new definition
-                    for variable in self.variable_definitions[var]:
-                        if variable.line == line:
-                            new_reaching[var].add(variable)
-                
-                # Check if anything changed
-                if new_reaching != old_reaching:
-                    self.reaching_definitions[line] = new_reaching
-                    changed = True
+            # Start with definitions from previous line
+            if i > 0:
+                prev_line = sorted_lines[i-1]
+                for var, defs in self.reaching_definitions[prev_line].items():
+                    self.reaching_definitions[line][var].update(defs)
+            
+            # Add definitions from current line
+            for var in slice_node.variables_defined:
+                # Kill previous definitions of this variable
+                self.reaching_definitions[line][var] = set()
+                # Add new definition
+                for variable in self.variable_definitions[var]:
+                    if variable.line == line:
+                        self.reaching_definitions[line][var].add(variable)
     
     def _backward_slice(self, target_variable: str, target_line: int) -> Set[int]:
         """
@@ -311,7 +312,8 @@ class IntraproceduralSlicer:
                         if (name_node and 
                             name_node.text.decode('utf-8') == variable_name and
                             value_node):
-                            return self._node_to_pattern(value_node)
+                            pattern = self._node_to_pattern(value_node)
+                            return pattern
             
             elif node.type == 'assignment_expression':
                 left = node.child_by_field_name('left')
@@ -320,9 +322,17 @@ class IntraproceduralSlicer:
                 if (left and right and 
                     left.type == 'identifier' and
                     left.text.decode('utf-8') == variable_name):
-                    return self._node_to_pattern(right)
+                    pattern = self._node_to_pattern(right)
+                    return pattern
+            
+            elif node.type == 'expression_statement':
+                # Check if this contains a variable declaration or assignment
+                for child in node.children:
+                    result = self._extract_pattern_from_definition(child, variable_name)
+                    if result:
+                        return result
         
-        except Exception:
+        except Exception as e:
             pass
         
         return None
@@ -370,28 +380,33 @@ class IntraproceduralSlicer:
             if not (object_node and name_node):
                 return "<*>"
             
+            object_text = object_node.text.decode('utf-8') if object_node else ""
             method_name = name_node.text.decode('utf-8')
             
             if method_name == 'toString':
                 # Could be StringBuilder.toString()
                 return self._node_to_pattern(object_node)
             
-            elif method_name == 'format':
+            elif method_name == 'format' and object_text == 'String':
                 # String.format call
                 args_node = node.child_by_field_name('arguments')
                 if args_node:
-                    # First argument is format string
+                    # First argument is format string - look through all children
                     for child in args_node.children:
                         if child.type == 'string_literal':
                             format_str = child.text.decode('utf-8')
                             if format_str.startswith('"') and format_str.endswith('"'):
                                 format_str = format_str[1:-1]
+                            elif format_str.startswith("'") and format_str.endswith("'"):
+                                format_str = format_str[1:-1]
+                            
                             # Replace format specifiers with placeholders
                             import re
+                            # Handle common Java format specifiers: %s, %d, %f, etc.
                             pattern = re.sub(r'%[+-]?[0-9]*\.?[0-9]*[diouxXeEfFgGaAcsSn]', '<*>', format_str)
                             return pattern
             
             return "<*>"
         
-        except Exception:
+        except Exception as e:
             return "<*>"
