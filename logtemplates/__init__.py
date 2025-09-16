@@ -11,14 +11,13 @@ __author__ = "Log Template Extraction System"
 from .java_extractor import JavaLogExtractor
 from .templating import TemplateRule, LogTemplateBuilder
 from .trie import TemplateTrie
-from .io_utils import CacheManager, JSONLWriter, JSONLReader
+from .io_utils import JSONLWriter, JSONLReader
 
 __all__ = [
     "JavaLogExtractor",
     "TemplateRule", 
     "LogTemplateBuilder",
     "TemplateTrie",
-    "CacheManager",
     "JSONLWriter",
     "JSONLReader"
 ]

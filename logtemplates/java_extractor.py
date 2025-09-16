@@ -15,7 +15,7 @@ from tqdm import tqdm
 from .models import LogTemplate, LogLevel, SourceLocation, ExtractionContext
 from .templating import LogTemplateBuilder
 from .slice import IntraproceduralSlicer
-from .io_utils import CacheManager, RepositoryWalker
+from .io_utils import RepositoryWalker
 
 
 class JavaLogExtractor:
@@ -27,18 +27,15 @@ class JavaLogExtractor:
     """
     
     def __init__(self, 
-                 cache_dir: str = ".logtemplates_cache",
                  max_branch_variants: int = 16,
                  parallel_workers: int = None):
         """
         Initialize the Java log extractor.
         
         Args:
-            cache_dir: Directory for caching extracted templates
             max_branch_variants: Maximum variants per logging site to prevent explosion
             parallel_workers: Number of parallel workers for file processing
         """
-        self.cache_manager = CacheManager(cache_dir)
         self.template_builder = LogTemplateBuilder()
         self.slicer = IntraproceduralSlicer()
         self.max_branch_variants = max_branch_variants
@@ -61,8 +58,7 @@ class JavaLogExtractor:
     def extract_from_repository(self, 
                                repo_path: str,
                                include_patterns: List[str] = None,
-                               exclude_patterns: List[str] = None,
-                               use_cache: bool = True) -> List[LogTemplate]:
+                               exclude_patterns: List[str] = None) -> List[LogTemplate]:
         """
         Extract log templates from entire repository.
         
@@ -70,7 +66,6 @@ class JavaLogExtractor:
             repo_path: Path to repository root
             include_patterns: File patterns to include (default: ["*.java"])
             exclude_patterns: File patterns to exclude
-            use_cache: Whether to use incremental caching
             
         Returns:
             List of extracted LogTemplate objects
@@ -92,51 +87,13 @@ class JavaLogExtractor:
             print("No Java files found to process")
             return []
         
-        # Filter files based on cache if enabled
-        files_to_process = []
-        cached_templates = []
-        
-        if use_cache:
-            cached_templates = self.cache_manager.get_cached_templates()
-            print(f"Loaded {len(cached_templates)} templates from cache")
-            
-            for file_path in all_files:
-                if not self.cache_manager.is_file_cached(str(file_path)):
-                    files_to_process.append(file_path)
-        else:
-            files_to_process = all_files
-        
-        print(f"Processing {len(files_to_process)} files (cached: {len(all_files) - len(files_to_process)})")
+        print(f"Processing {len(all_files)} files")
         
         # Process files in parallel
-        new_templates = []
-        if files_to_process:
-            new_templates = self._process_files_parallel(files_to_process)
+        templates = self._process_files_parallel(all_files)
         
-        # Combine with cached templates
-        all_templates = cached_templates + new_templates
-        
-        # Update cache with incremental approach
-        if use_cache and new_templates:
-            # Only save new templates to cache, don't resave existing ones
-            existing_cached_templates = self.cache_manager.get_cached_templates()
-            
-            # Filter out any new templates that might already exist (deduplication)
-            new_template_ids = {t.template_id for t in new_templates}
-            existing_template_ids = {t.template_id for t in existing_cached_templates}
-            truly_new_templates = [t for t in new_templates if t.template_id not in existing_template_ids]
-            
-            if truly_new_templates:
-                # Save the complete set: existing + truly new
-                final_templates = existing_cached_templates + truly_new_templates
-                self.cache_manager.save_templates(final_templates)
-            
-            # Mark processed files
-            for file_path in files_to_process:
-                self.cache_manager.mark_file_processed(str(file_path))
-        
-        print(f"Extracted {len(all_templates)} total templates ({len(new_templates)} new)")
-        return all_templates
+        print(f"Extracted {len(templates)} total templates")
+        return templates
     
     def extract_from_file(self, file_path: str) -> List[LogTemplate]:
         """

@@ -3,7 +3,9 @@
 CLI tool for extracting log templates from Java repositories.
 
 Usage:
-    python extract_templates.py --src <repo_root> --out templates.jsonl --exclude '*/test/*' '*/examples/*'
+    python extract_templates.py --src <repo_root> [--out output.jsonl] [--exclude '*/test/*']
+    
+    If --out is not specified, creates output_templates/<reponame>_<timestamp>.jsonl
 """
 
 import click
@@ -11,6 +13,7 @@ import os
 import sys
 from pathlib import Path
 from typing import List
+from datetime import datetime
 
 # Add the package to Python path
 sys.path.insert(0, os.path.dirname(__file__))
@@ -19,15 +22,34 @@ from logtemplates import JavaLogExtractor
 from logtemplates.io_utils import JSONLWriter
 
 
+def generate_default_output_path(src_path: str) -> str:
+    """Generate default output path based on source repository name and timestamp."""
+    # Create output_templates directory
+    output_dir = Path("output_templates")
+    output_dir.mkdir(exist_ok=True)
+    
+    # Get repository name from source path
+    src_path_obj = Path(src_path).resolve()
+    repo_name = src_path_obj.name
+    
+    # Generate timestamp
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    # Create filename: reponame_timestamp.jsonl
+    filename = f"{repo_name}_{timestamp}.jsonl"
+    
+    return str(output_dir / filename)
+
+
 @click.command()
 @click.option('--src', '-s', 
               required=True,
               type=click.Path(exists=True, file_okay=False, dir_okay=True),
               help='Source repository root directory')
 @click.option('--out', '-o',
-              required=True,
+              required=False,
               type=click.Path(),
-              help='Output JSONL file for extracted templates')
+              help='Output JSONL file for extracted templates (default: auto-generated in output_templates/)')
 @click.option('--include', '-i',
               multiple=True,
               default=['*.java'],
@@ -35,13 +57,6 @@ from logtemplates.io_utils import JSONLWriter
 @click.option('--exclude', '-e',
               multiple=True,
               help='Exclude file patterns (can be specified multiple times)')
-@click.option('--cache-dir',
-              default='.logtemplates_cache',
-              type=click.Path(),
-              help='Cache directory for incremental processing')
-@click.option('--no-cache',
-              is_flag=True,
-              help='Disable caching and reprocess all files')
 @click.option('--workers', '-w',
               type=int,
               default=None,
@@ -57,8 +72,6 @@ def extract_templates(src: str,
                      out: str, 
                      include: tuple, 
                      exclude: tuple,
-                     cache_dir: str,
-                     no_cache: bool,
                      workers: int,
                      max_variants: int,
                      verbose: bool):
@@ -72,27 +85,35 @@ def extract_templates(src: str,
     Examples:
     
     \b
-    # Extract from current directory
-    python extract_templates.py --src . --out templates.jsonl
+    # Extract from current directory (auto-generates output filename)
+    python extract_templates.py --src .
     
     \b
-    # Extract with custom exclusions
+    # Extract from Kafka repository (creates output_templates/kafka_20241216_143022.jsonl)
+    python extract_templates.py --src /path/to/kafka
+    
+    \b
+    # Extract with custom output path and exclusions
     python extract_templates.py --src /path/to/kafka \\
-        --out kafka_templates.jsonl \\
+        --out my_templates.jsonl \\
         --exclude '*/test/*' '*/examples/*' '*/benchmarks/*'
     
     \b
-    # Force reprocessing without cache
-    python extract_templates.py --src . --out templates.jsonl --no-cache
+    # Extract with specific number of workers
+    python extract_templates.py --src . --workers 8
     """
+    
+    # Generate default output path if not provided
+    if not out:
+        out = generate_default_output_path(src)
+        if verbose:
+            click.echo(f"No output file specified, using: {out}")
     
     if verbose:
         click.echo(f"Extracting templates from: {src}")
         click.echo(f"Output file: {out}")
         click.echo(f"Include patterns: {list(include)}")
         click.echo(f"Exclude patterns: {list(exclude)}")
-        click.echo(f"Cache directory: {cache_dir}")
-        click.echo(f"Use cache: {not no_cache}")
         click.echo(f"Workers: {workers or 'auto'}")
         click.echo(f"Max variants per site: {max_variants}")
         click.echo()
@@ -100,7 +121,6 @@ def extract_templates(src: str,
     try:
         # Initialize extractor
         extractor = JavaLogExtractor(
-            cache_dir=cache_dir,
             max_branch_variants=max_variants,
             parallel_workers=workers
         )
@@ -109,8 +129,7 @@ def extract_templates(src: str,
         templates = extractor.extract_from_repository(
             repo_path=src,
             include_patterns=list(include) if include else None,
-            exclude_patterns=list(exclude) if exclude else None,
-            use_cache=not no_cache
+            exclude_patterns=list(exclude) if exclude else None
         )
         
         if not templates:

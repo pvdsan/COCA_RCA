@@ -3,7 +3,7 @@ Core data models for log template extraction and matching.
 """
 
 from dataclasses import dataclass, field
-from typing import List, Optional, Dict, Any
+from typing import List, Optional
 from dataclasses_json import dataclass_json, config
 from enum import Enum
 
@@ -55,11 +55,6 @@ class LogTemplate:
     ))
     branch_variant: int = 0  # for branch-aware extraction
     
-    def matches_level(self, level: str) -> bool:
-        """Check if this template matches a given log level."""
-        if self.level == LogLevel.UNKNOWN:
-            return True
-        return self.level.value.lower() == level.lower()
 
 
 @dataclass_json
@@ -83,18 +78,11 @@ class ExtractionContext:
     class_name: Optional[str] = None
     method_name: Optional[str] = None
     current_line: int = 0
-    variables: Dict[str, Any] = None
-    
-    def __post_init__(self):
-        if self.variables is None:
-            self.variables = {}
-    
     def copy(self) -> 'ExtractionContext':
         """Create a copy of this context."""
         return ExtractionContext(
             file_path=self.file_path,
             class_name=self.class_name,
             method_name=self.method_name,
-            current_line=self.current_line,
-            variables=self.variables.copy()
+            current_line=self.current_line
         )

@@ -1,93 +1,16 @@
 """
-I/O utilities for repository walking, caching, and JSONL operations.
+I/O utilities for repository walking and JSONL operations.
 """
 
 import os
 import json
-import hashlib
 import fnmatch
 from pathlib import Path
 from typing import List, Dict, Any, Iterator, Optional, Set
 from dataclasses import asdict
-import pickle
 from tqdm import tqdm
 
 from .models import LogTemplate
-
-
-class CacheManager:
-    """
-    Manages incremental caching based on file modification times.
-    """
-    
-    def __init__(self, cache_dir: str = ".logtemplates_cache"):
-        self.cache_dir = Path(cache_dir)
-        self.cache_dir.mkdir(exist_ok=True)
-        self.metadata_file = self.cache_dir / "metadata.json"
-        self.templates_file = self.cache_dir / "templates.pkl"
-        
-        # Load existing metadata
-        self.metadata = self._load_metadata()
-    
-    def _load_metadata(self) -> Dict[str, float]:
-        """Load file metadata (mtime) from cache."""
-        if self.metadata_file.exists():
-            try:
-                with open(self.metadata_file, 'r') as f:
-                    return json.load(f)
-            except (json.JSONDecodeError, IOError):
-                pass
-        return {}
-    
-    def _save_metadata(self) -> None:
-        """Save file metadata to cache."""
-        with open(self.metadata_file, 'w') as f:
-            json.dump(self.metadata, f, indent=2)
-    
-    def is_file_cached(self, file_path: str) -> bool:
-        """Check if file is already cached and up-to-date."""
-        try:
-            current_mtime = os.path.getmtime(file_path)
-            cached_mtime = self.metadata.get(file_path, 0)
-            # File is cached if it hasn't been modified since we last processed it
-            return cached_mtime > 0 and current_mtime <= cached_mtime
-        except OSError:
-            return False
-    
-    def mark_file_processed(self, file_path: str) -> None:
-        """Mark file as processed with current mtime."""
-        try:
-            self.metadata[file_path] = os.path.getmtime(file_path)
-        except OSError:
-            pass
-    
-    def get_cached_templates(self) -> List[LogTemplate]:
-        """Load cached templates."""
-        if self.templates_file.exists():
-            try:
-                with open(self.templates_file, 'rb') as f:
-                    return pickle.load(f)
-            except (pickle.PickleError, IOError):
-                pass
-        return []
-    
-    def save_templates(self, templates: List[LogTemplate]) -> None:
-        """Save templates to cache, replacing the entire cache."""
-        with open(self.templates_file, 'wb') as f:
-            pickle.dump(templates, f)
-        self._save_metadata()
-    
-    def invalidate_file(self, file_path: str) -> None:
-        """Remove file from cache."""
-        self.metadata.pop(file_path, None)
-        self._save_metadata()
-    
-    def clear_cache(self) -> None:
-        """Clear all cached data."""
-        self.metadata.clear()
-        if self.templates_file.exists():
-            self.templates_file.unlink()
-        self._save_metadata()
 
 
 class RepositoryWalker:
@@ -241,20 +164,3 @@ class JSONLReader:
                     print(f"Warning: Skipping invalid template at line {line_num}: {e}")
 
 
-def create_file_hash(file_path: str) -> str:
-    """Create a hash of file content for change detection."""
-    hasher = hashlib.md5()
-    try:
-        with open(file_path, 'rb') as f:
-            for chunk in iter(lambda: f.read(4096), b""):
-                hasher.update(chunk)
-        return hasher.hexdigest()
-    except IOError:
-        return ""
-
-
-def ensure_directory(path: str) -> Path:
-    """Ensure directory exists and return Path object."""
-    dir_path = Path(path)
-    dir_path.mkdir(parents=True, exist_ok=True)
-    return dir_path
