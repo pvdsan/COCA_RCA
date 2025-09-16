@@ -405,8 +405,61 @@ class IntraproceduralSlicer:
                             # Handle common Java format specifiers: %s, %d, %f, etc.
                             pattern = re.sub(r'%[+-]?[0-9]*\.?[0-9]*[diouxXeEfFgGaAcsSn]', '<*>', format_str)
                             return pattern
+                        elif child.type == 'binary_expression':
+                            # Handle concatenated format string
+                            concatenated_str = self._extract_concatenated_format_string(child)
+                            if concatenated_str:
+                                import re
+                                pattern = re.sub(r'%[+-]?[0-9]*\.?[0-9]*[diouxXeEfFgGaAcsSn]', '<*>', concatenated_str)
+                                return pattern
             
             return "<*>"
         
         except Exception as e:
             return "<*>"
+    
+    def _extract_concatenated_format_string(self, node: Any) -> str:
+        """Extract concatenated string from binary expression for format strings."""
+        if node.type != 'binary_expression':
+            return ""
+        
+        # Check if this is string concatenation (+)
+        operator = node.child_by_field_name('operator')
+        if not operator or operator.text.decode('utf-8') != '+':
+            return ""
+        
+        left = node.child_by_field_name('left')
+        right = node.child_by_field_name('right')
+        
+        if not (left and right):
+            return ""
+        
+        # Recursively extract parts
+        left_str = self._extract_string_content(left)
+        right_str = self._extract_string_content(right)
+        
+        # Combine the strings
+        if left_str is not None and right_str is not None:
+            return left_str + right_str
+        elif left_str is not None:
+            return left_str
+        elif right_str is not None:
+            return right_str
+        
+        return ""
+    
+    def _extract_string_content(self, node: Any) -> str:
+        """Extract string content from various node types."""
+        if node.type == 'string_literal':
+            content = node.text.decode('utf-8')
+            if content.startswith('"') and content.endswith('"'):
+                return content[1:-1]
+            elif content.startswith("'") and content.endswith("'"):
+                return content[1:-1]
+            return content
+        elif node.type == 'binary_expression':
+            # Recursively handle nested concatenation
+            return self._extract_concatenated_format_string(node)
+        else:
+            # Non-string node, can't extract
+            return None
