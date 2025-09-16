@@ -37,7 +37,7 @@ class SLF4JTemplateRule(TemplateRule):
     """
     
     def __init__(self):
-        self.slf4j_methods = {'trace', 'debug', 'info', 'warn', 'error'}
+        self.slf4j_methods = {'trace', 'debug', 'info', 'warn', 'error', 'log'}
         self.slf4j_loggers = {'log', 'logger', 'LOG', 'LOGGER'}
     
     def can_handle(self, node: Any, context: ExtractionContext) -> bool:
@@ -71,18 +71,33 @@ class SLF4JTemplateRule(TemplateRule):
             if not args_node:
                 return []
             
-            # Find the first argument (message template)
-            first_arg = None
-            for child in args_node.children:
-                if child.type in ['string_literal', 'binary_expression', 'method_invocation', 'identifier']:
-                    first_arg = child
-                    break
+            # Find the message argument
+            # For most logging methods, it's the first argument
+            # For logger.log(), it's typically the 4th argument (after marker, fqcn, level)
+            message_arg = None
             
-            if not first_arg:
+            # Get method name to determine argument position
+            name_node = node.child_by_field_name('name')
+            method_name = name_node.text.decode('utf-8') if name_node else ""
+            
+            # Collect all non-punctuation arguments
+            args = []
+            for child in args_node.children:
+                if child.type in ['string_literal', 'binary_expression', 'method_invocation', 'identifier', 'null_literal']:
+                    args.append(child)
+            
+            if method_name == 'log' and len(args) >= 4:
+                # For logger.log(marker, fqcn, level, message, ...), message is 4th argument
+                message_arg = args[3]
+            elif len(args) >= 1:
+                # For other methods, message is typically first argument
+                message_arg = args[0]
+            
+            if not message_arg:
                 return []
             
             # Extract message content based on argument type
-            message = self._extract_message_from_node(first_arg)
+            message = self._extract_message_from_node(message_arg)
             if not message:
                 return []
             
