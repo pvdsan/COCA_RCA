@@ -66,31 +66,25 @@ class SLF4JTemplateRule(TemplateRule):
     def extract_template(self, node: Any, context: ExtractionContext) -> List[str]:
         """Extract SLF4J template pattern."""
         try:
-            # Get method name for log level
-            name_node = node.child_by_field_name('name')
-            level = LogLevel(name_node.text.decode('utf-8').lower())
-            
             # Get arguments
             args_node = node.child_by_field_name('arguments')
             if not args_node:
                 return []
             
-            # First argument should be the message template
+            # Find the first argument (message template)
             first_arg = None
             for child in args_node.children:
-                if child.type == 'string_literal':
+                if child.type in ['string_literal', 'binary_expression']:
                     first_arg = child
                     break
             
             if not first_arg:
                 return []
             
-            # Extract string content (remove quotes)
-            message = first_arg.text.decode('utf-8')
-            if message.startswith('"') and message.endswith('"'):
-                message = message[1:-1]
-            elif message.startswith("'") and message.endswith("'"):
-                message = message[1:-1]
+            # Extract message content based on argument type
+            message = self._extract_message_from_node(first_arg)
+            if not message:
+                return []
             
             # Replace {} placeholders with <*>
             template = re.sub(r'\{\}', '<*>', message)
@@ -102,6 +96,49 @@ class SLF4JTemplateRule(TemplateRule):
             
         except Exception:
             return []
+    
+    def _extract_message_from_node(self, node: Any) -> str:
+        """Extract message string from various node types."""
+        if node.type == 'string_literal':
+            # Simple string literal
+            message = node.text.decode('utf-8')
+            if message.startswith('"') and message.endswith('"'):
+                return message[1:-1]
+            elif message.startswith("'") and message.endswith("'"):
+                return message[1:-1]
+            return message
+        
+        elif node.type == 'binary_expression':
+            # Handle string concatenation like "str1" + "str2"
+            return self._extract_concatenated_string(node)
+        
+        return ""
+    
+    def _extract_concatenated_string(self, node: Any) -> str:
+        """Extract concatenated string from binary expression."""
+        if node.type != 'binary_expression':
+            return ""
+        
+        # Check if this is string concatenation (+)
+        operator = node.child_by_field_name('operator')
+        if not operator or operator.text.decode('utf-8') != '+':
+            return ""
+        
+        left = node.child_by_field_name('left')
+        right = node.child_by_field_name('right')
+        
+        if not (left and right):
+            return ""
+        
+        # Recursively extract parts
+        left_str = self._extract_message_from_node(left)
+        right_str = self._extract_message_from_node(right)
+        
+        # Only combine if both are string literals
+        if left_str and right_str:
+            return left_str + right_str
+        
+        return ""
 
 
 class StringFormatTemplateRule(TemplateRule):
